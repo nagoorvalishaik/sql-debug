@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQL Debug Query Generator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>SQL Debug Query Generator</h1>
+      <p class="lede">Paste a query and copy back a version that shows, for every person, which condition they pass (1) or fail (0), plus <b>all_pass</b> and <b>first_failed</b>. Runs in your browser only.</p>
+    </div>
+    <div class="stats" id="stats"></div>
+  </header>
+
+  <div class="bench">
+    <div class="pane">
+      <div class="pane-head">
+        <div class="step"><i>1</i> Paste your query</div>
+        <div class="actions">
+          <button class="btn" id="exampleBtn" type="button">Load example</button>
+          <button class="btn" id="clearBtn" type="button">Clear</button>
+        </div>
+      </div>
+      <textarea id="src" spellcheck="false" aria-label="Your SQL query" placeholder="SELECT ... FROM ... JOIN ... WHERE ..."></textarea>
+      <div class="opts">
+        <div class="field">
+          <label for="keyVal">Only check these IDs (optional)</label>
+          <input id="keyVal" type="text" placeholder="e.g. 0012345, 0067890" autocomplete="off">
+        </div>
+        <div class="field" style="flex:0 1 220px">
+          <label for="keyCol">ID column</label>
+          <input id="keyCol" type="text" placeholder="identity_identifier" autocomplete="off">
+        </div>
+      </div>
+    </div>
+
+    <div class="pane">
+      <div class="pane-head">
+        <div class="step"><i>2</i> Copy the debug query</div>
+        <div class="actions">
+          <div class="tabs" role="tablist" aria-label="Query type">
+            <button class="tab" role="tab" id="tabFlags" aria-selected="true" type="button">Flags per person</button>
+            <button class="tab" role="tab" id="tabCounts" aria-selected="false" type="button">Failure counts</button>
+          </div>
+          <button class="btn primary" id="copyBtn" type="button">Copy query</button>
+        </div>
+      </div>
+      <div class="code" id="code"></div>
+      <div class="notes" id="notes"></div>
+    </div>
+  </div>
+
+  <section class="ref">
+    <div class="ref-head">
+      <div>
+        <h2>What each flag checks</h2>
+        <p>1 means the person passes the check, 0 means they fail it. <b>Required</b> flags decide all_pass. <b>Detail</b> flags break a joined table down so you can see which filter on it is the problem.</p>
+      </div>
+      <div class="legend"><span><span class="chip req">Required</span></span><span><span class="chip det">Detail</span></span></div>
+    </div>
+    <div class="tbl">
+      <table class="flags">
+        <thead><tr><th>#</th><th>Flag column</th><th>What it checks</th><th>Table</th><th>Type</th></tr></thead>
+        <tbody id="flagRows"></tbody>
+      </table>
+    </div>
+    <div class="foot" id="foot"></div>
+  </section>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
