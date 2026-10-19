@@ -1,4 +1,4 @@
-var SAMPLE =""/* ---------- scanning ---------- */
+/* ---------- scanning ---------- */
 function scan(s) {
   const n = s.length, masked = new Array(n), clean = new Array(n), depth = new Int16Array(n), comments = [];
   let d = 0, i = 0;
@@ -306,15 +306,15 @@ function build(sql, keyCol, keyVals) {
 
   const req = flags.filter(f => f.required);
   const passExpr = req.length ? 'CASE WHEN ' + req.map(f => `x.${f.name} = 1`).join('\n          AND ') + ' THEN 1 ELSE 0 END' : '1';
-  const failCase = 'CASE\n' + flags.map(f => `        WHEN x.${f.name} = 0 THEN ${sqlStr(f.label)}`).join('\n') + "\n        ELSE 'PASS'\n    END";
+  const failCase = 'CASE\n' + flags.map(f => `        WHEN x.${f.name} = 0 THEN ${sqlStr(f.name)}`).join('\n') + "\n        ELSE 'PASS'\n    END";
   const outerCols = selCols.map(c => `    x.${c.out}`).concat(flags.map(f => `    x.${f.name}`), [`    ${passExpr} AS ${allPass}`, `    ${flags.length ? failCase : "'PASS'"} AS ${firstFailed}`]);
   const outer = `SELECT\n${outerCols.join(',\n')}\nFROM (\n${indent(inner, pad1)}\n) x`;
 
   const failNames = new Set();
   const counts = 'SELECT\n    COUNT(*) AS total_records,\n' + flags.map(f => {
     let n = 'fail_' + f.name.replace(/^f_/, ''), k = n, i = 2; while (failNames.has(k)) k = `${n}_${i++}`; failNames.add(k);
-    return `    SUM(CASE WHEN y.${f.name} = 0 THEN 1 ELSE 0 END) AS ${k},`;
-  }).join('\n') + `\n    SUM(y.${allPass}) AS records_passing_all\nFROM (\n${indent(outer, pad1)}\n) y`;
+    return `    SUM(CASE WHEN x.${f.name} = 0 THEN 1 ELSE 0 END) AS ${k},`;
+  }).join('\n') + `\n    SUM(${req.length ? passExpr.replace(/\n {10}/g, '\n              ') : '1'}) AS records_passing_all\nFROM (\n${indent(inner, pad1)}\n) x`;
 
   return { flagsSql: outer, countsSql: counts, flags, warnings: P.warnings, base, joins, conds, selCols, allPass, firstFailed, defaultKey: selCols.length ? selCols[0].name : '' };
 }
@@ -339,7 +339,6 @@ function build(sql, keyCol, keyVals) {
     }
     return out + esc(line.slice(last));
   }
-  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
 
   var tab = 'flags', result = null, keyTouched = false, timer = null;
 
@@ -380,12 +379,11 @@ function build(sql, keyCol, keyVals) {
     var cols = result.selCols.map(function (c) { return c.out; });
     $('foot').innerHTML = '<div><b>Target data extension fields:</b> ' + (cols.length ? '<code>' + esc(cols.join(', ')) + '</code> as Text, ' : '') +
       '<code>' + esc(result.flags.map(function (f) { return f.name; }).concat([result.allPass]).join(', ')) + '</code> as Number, <code>' + esc(result.firstFailed) + '</code> as Text(60).</div>' +
-      '<div><b>first_failed</b> names the first check (in the order above) that the person fails, or PASS.</div>';
+      '<div><b>first_failed</b> shows the flag name of the first check (in the order above) that the person fails, or PASS. Look it up in this table.</div>';
   }
 
   function run() {
     var sql = $('src').value;
-    store('sqldbg-src', sql);
     if (!sql.trim()) { result = { error: 'Paste a query on the left to get started.' }; paint(); return; }
     var r = build(sql, $('keyCol').value, $('keyVal').value);
     if (!r.error && !keyTouched && r.defaultKey && $('keyCol').value !== r.defaultKey) {
@@ -396,12 +394,11 @@ function build(sql, keyCol, keyVals) {
   }
   function soon() { clearTimeout(timer); timer = setTimeout(run, 200); }
 
-  $('src').value = store('sqldbg-src') || SAMPLE;
+  $('src').value = '';
   $('src').addEventListener('input', soon);
   $('keyVal').addEventListener('input', soon);
   $('keyCol').addEventListener('input', function () { keyTouched = true; soon(); });
-  $('exampleBtn').addEventListener('click', function () { $('src').value = SAMPLE; keyTouched = false; $('keyCol').value = ''; $('keyVal').value = ''; run(); });
-  $('clearBtn').addEventListener('click', function () { $('src').value = ''; $('keyVal').value = ''; run(); $('src').focus(); });
+  $('clearBtn').addEventListener('click', function () { $('src').value = ''; $('keyVal').value = ''; $('keyCol').value = ''; keyTouched = false; run(); $('src').focus(); });
   function setTab(t) { tab = t; $('tabFlags').setAttribute('aria-selected', t === 'flags'); $('tabCounts').setAttribute('aria-selected', t === 'counts'); paint(); }
   $('tabFlags').addEventListener('click', function () { setTab('flags'); });
   $('tabCounts').addEventListener('click', function () { setTab('counts'); });
