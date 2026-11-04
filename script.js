@@ -432,7 +432,7 @@ function build(sql, keyCol, keyVals, detail) {
       const c = it.cond, rw = rewriteSubqueries(ctx, c.code), code = rw.changed ? collapse(rw.code) : render(c.code, pad1 + '    ');
       return { name: fname(condName(sc, c)), expr: `CASE WHEN ${code} THEN 1 ELSE 0 END`, label: lbl(c.label || collapse(c.code)), src: collapse(c.code), table: tableTxt, required: true };
     }
-    if (it.kind === 'row') return { name: fname(slug(al) + '_row'), expr: groupJoin(g.S, []), label: lbl(`No ${g.aliases.join(' + ')} row`), src: 'Row exists', table: tableTxt, required: !!it.standalone };
+    if (it.kind === 'row') return { name: fname(slug(al) + '_row'), expr: groupJoin(g.S, []), label: lbl(`Has a ${g.aliases.join(' + ')} row`), src: 'Row exists', table: tableTxt, required: !!it.standalone };
     if (it.kind === 'jc') {
       const c = it.cond, nm = c.label ? slug(c.label) : condName(sc, c);
       return { name: fname(nm), expr: groupJoin(g.S, [c]), label: lbl(c.label || `${g.aliases.join(' + ')}: ${collapse(c.code)}`), src: collapse(c.code), table: tableTxt, required: g.conds.length === 1 };
@@ -505,7 +505,7 @@ function build(sql, keyCol, keyVals, detail) {
 
   var tab = 'flags', result = null, keyTouched = false, timer = null;
 
-  var wfOrder = [], wfData = null, wfMsg = '', wfOff = {}, wfNames = {};
+  var wfOrder = [], wfData = null, wfMsg = '', wfOff = {};
   function currentSql() { return result && !result.error ? (tab === 'flags' ? result.flagsSql : tab === 'counts' ? result.countsSql : waterfallSql(result)) : ''; }
   function countWhere(idx) {
     var t = 0;
@@ -522,7 +522,6 @@ function build(sql, keyCol, keyVals, detail) {
   }
   function activeCount() { return wfOrder.filter(function (id) { return !wfOff[id]; }).length; }
   function offCount() { return wfOrder.length - activeCount(); }
-  function stepName(s) { return wfNames[s.id] != null && wfNames[s.id].trim() ? wfNames[s.id].trim() : s.label; }
 
   function fmt(n) { return Number(n).toLocaleString('en-US'); }
   function pct(a, b) { return b ? (a / b * 100).toFixed(1).replace(/\.0$/, '') + '%' : '0%'; }
@@ -535,7 +534,7 @@ function build(sql, keyCol, keyVals, detail) {
     var n = wfNumbers(), total = n ? n[0] : 0, worst = -1, worstDrop = -1;
     if (n) for (var i = 1; i < n.length; i++) if (n[i - 1] - n[i] > worstDrop) { worstDrop = n[i - 1] - n[i]; worst = i; }
     function bar(rem, prev) {
-      if (!n) return '<div class="wf-track empty"></div>';
+      if (!n) return '<div class="wf-track wf-empty"></div>';
       var w = total ? rem / total * 100 : 0, d = total ? (prev - rem) / total * 100 : 0;
       return '<div class="wf-track"><span class="wf-keep" style="width:' + w + '%"></span>' + (d > 0 ? '<span class="wf-drop" style="left:' + w + '%;width:' + d + '%"></span>' : '') + '</div>';
     }
@@ -550,11 +549,11 @@ function build(sql, keyCol, keyVals, detail) {
         '<div class="wf-move"><button class="mv" type="button" data-i="' + i + '" data-d="-1" aria-label="Move up"' + (i === 0 ? ' disabled' : '') + '>&#9650;</button>' +
         '<button class="mv" type="button" data-i="' + i + '" data-d="1" aria-label="Move down"' + (i === steps.length - 1 ? ' disabled' : '') + '>&#9660;</button></div>' +
         '<div class="wf-lbl"><div class="wf-line"><span class="wf-step">' + (off ? '&ndash;' : k) + '</span>' +
-        '<input class="wf-name" type="text" data-id="' + esc(s.id) + '" value="' + esc(stepName(s)) + '" aria-label="Step name" title="Click to rename. Original: ' + esc(s.label) + '">' +
-        '<button class="wf-tog" type="button" data-id="' + esc(s.id) + '" aria-pressed="' + (!off) + '" title="' + (off ? 'Switched off: the query ignores this step' : 'Switch this step off to see the audience without it') + '">' + (off ? 'Off' : 'On') + '</button></div>' +
+        '<span class="wf-text">' + esc(s.label) + '</span>' +
+        '<button class="wf-tog" type="button" role="switch" data-id="' + esc(s.id) + '" aria-checked="' + (!off) + '" aria-label="Include this step" title="' + (off ? 'Switched off: this step is ignored' : 'Switch off to see the audience without this step') + '"><span class="knob"></span></button></div>' +
         '<div class="wf-meta"><span class="chip ' + (s.kind === 'include' ? 'req' : 'exc') + '">' + (s.kind === 'include' ? 'Keep if passes' : 'Exclusion') + '</span><code class="wf-id">' + esc(s.id) + '</code>' +
         (isWorst ? '<span class="wf-flag">Biggest drop</span>' : '') + '</div></div>' +
-        (off ? '<div class="wf-track empty"></div><div class="wf-num wf-rm"><small>Switched off</small></div><div class="wf-num wf-left"></div>' :
+        (off ? '<div class="wf-track wf-empty"></div><div class="wf-num wf-rm"><small>Switched off</small></div><div class="wf-num wf-left"></div>' :
           bar(rem, prev) +
           '<div class="wf-num wf-rm">' + (n ? '<span class="neg">&minus;' + fmt(drop) + '</span><small>' + pct(drop, prev) + ' of previous</small>' : '-') + '</div>' +
           '<div class="wf-num wf-left">' + (n ? '<b>' + fmt(rem) + '</b><small>' + pct(rem, total) + ' of start</small>' : '-') + '</div>') + '</div>';
@@ -642,7 +641,7 @@ function build(sql, keyCol, keyVals, detail) {
     if (!r.error) {
       var ids = r.wfSteps.map(function (s) { return s.id; });
       var same = ids.length === wfOrder.length && ids.every(function (id) { return wfOrder.indexOf(id) >= 0; });
-      if (!same) { wfOrder = ids; wfData = null; wfMsg = ''; wfOff = {}; wfNames = {}; $('wfPaste').value = ''; }
+      if (!same) { wfOrder = ids; wfData = null; wfMsg = ''; wfOff = {}; $('wfPaste').value = ''; }
     }
     paint();
   }
@@ -683,13 +682,6 @@ function build(sql, keyCol, keyVals, detail) {
     renderWf();
   });
   function countWhereAll(r) { return r.combos.reduce(function (t, c) { return t + c.n; }, 0); }
-  $('wfRows').addEventListener('input', function (e) {
-    if (e.target.classList.contains('wf-name')) wfNames[e.target.getAttribute('data-id')] = e.target.value;
-  });
-  $('wfRows').addEventListener('keydown', function (e) {
-    if (e.target.classList.contains('wf-name') && e.key === 'Enter') e.target.blur();
-    if (e.target.classList.contains('wf-name') && e.key === 'Escape') { delete wfNames[e.target.getAttribute('data-id')]; renderWf(); }
-  });
   $('wfClear').addEventListener('click', function () { $('wfPaste').value = ''; wfData = null; wfMsg = ''; renderWf(); });
 
   $('copyBtn').addEventListener('click', function () {
