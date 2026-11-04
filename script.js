@@ -566,9 +566,28 @@ function build(sql, keyCol, keyVals, detail) {
         '<div class="wf-num wf-rm"><span class="neg">&minus;' + fmt(total - fin) + '</span><small>removed in total</small></div><div class="wf-num wf-left"><b>' + fmt(fin) + '</b><small>' + pct(fin, total) + ' of start</small>' + cmp + '</div></div>';
     }
     $('wfRows').innerHTML = html;
+    renderExportBar();
     var msg = $('wfMsg');
     msg.textContent = wfMsg; msg.hidden = !wfMsg;
     msg.className = 'note' + (/^No result|different number/.test(wfMsg) ? '' : ' info');
+  }
+
+  function wfTable() {
+    var n = wfNumbers(); if (!n) return null;
+    var steps = wfOrder.filter(function (id) { return !wfOff[id]; }).map(function (id) { return result.wfSteps.filter(function (s) { return s.id === id; })[0]; });
+    var clean = function (v) { return String(v).replace(/[\t\r\n]+/g, ' '); };
+    var out = [['Step', 'Condition', 'Flag', 'Removed', '% of previous', 'Left', '% of start'].join('\t')];
+    out.push(['0', 'Everyone in ' + result.baseTable, '', '', '', n[0], '100%'].map(clean).join('\t'));
+    steps.forEach(function (s, i) { var prev = n[i], rem = n[i + 1]; out.push([i + 1, s.label, s.id, prev - rem, pct(prev - rem, prev), rem, pct(rem, n[0])].map(clean).join('\t')); });
+    var fin = n[n.length - 1];
+    out.push(['', 'Final audience', '', n[0] - fin, '', fin, pct(fin, n[0])].map(clean).join('\t'));
+    return { text: out.join('\n'), fin: fin, start: n[0] };
+  }
+  function renderExportBar() {
+    var x = wfTable(), bar = $('wfExport');
+    bar.hidden = !x;
+    if (!x) return;
+    $('wfFinal').innerHTML = (wfOrder.some(function (id) { return wfOff[id]; }) ? 'What-if audience' : 'Final audience') + ' <b>' + fmt(x.fin) + '</b> <small>' + pct(x.fin, x.start) + ' of ' + fmt(x.start) + '</small>';
   }
 
   function renderCheck() {
@@ -682,6 +701,12 @@ function build(sql, keyCol, keyVals, detail) {
     renderWf();
   });
   function countWhereAll(r) { return r.combos.reduce(function (t, c) { return t + c.n; }, 0); }
+  $('wfCopyTable').addEventListener('click', function () {
+    var x = wfTable(), btn = this; if (!x) return;
+    function done(m) { btn.textContent = m; btn.classList.add('done'); setTimeout(function () { btn.textContent = 'Copy table'; btn.classList.remove('done'); }, 1600); }
+    function fb() { var ta = document.createElement('textarea'); ta.value = x.text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); var ok = false; try { ok = document.execCommand('copy'); } catch (e) {} document.body.removeChild(ta); done(ok ? 'Copied' : 'Press Ctrl+C'); }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(x.text).then(function () { done('Copied'); }, fb); else fb();
+  });
   $('wfClear').addEventListener('click', function () { $('wfPaste').value = ''; wfData = null; wfMsg = ''; renderWf(); });
 
   $('copyBtn').addEventListener('click', function () {
