@@ -216,6 +216,106 @@ function render(code, pad) {
 const indent = (s, pad) => s.split('\n').map(l => l ? pad + l : l).join('\n');
 const sqlStr = s => { let t = s.replace(/\s+/g, ' ').trim(); if (t.length > 120) t = t.slice(0, 117) + '...'; return "'" + t.replace(/'/g, "''") + "'"; };
 
+/* ---------- LEFT JOIN rewriting: no subqueries in the SELECT list ---------- */
+function splitAnd(code) {
+  const sc = scan(code), n = code.length;
+  if (findTop(sc, /\bOR\b/gi, 0, n).length) return [code.trim()];
+  const parts = []; let st = 0, between = 0;
+  findTop(sc, /\b(?:AND|BETWEEN)\b/gi, 0, n).forEach(m => {
+    if (/^BETWEEN$/i.test(m.text)) { between++; return; }
+    if (between > 0) { between--; return; }
+    parts.push(sc.clean.slice(st, m.index)); st = m.end;
+  });
+  parts.push(sc.clean.slice(st));
+  return parts.map(p => p.trim()).filter(Boolean);
+}
+function aliasRefs(code) {
+  const sc = scan(code), out = [];
+  const re = new RegExp(`(${ID})\\s*\\.\\s*(${ID})`, 'g'); let m;
+  while ((m = re.exec(sc.masked))) {
+    const prev = sc.masked[m.index - 1];
+    if (prev && /[\w.\]$#@]/.test(prev)) continue;
+    out.push({ start: m.index, end: m.index + m[0].length, alias: norm(code.substr(m.index, m[1].length)), col: code.substr(m.index + m[0].length - m[2].length, m[2].length) });
+  }
+  return out;
+}
+function isExclusion(code) {
+  const sc = scan(code), M = sc.masked;
+  const m = M.match(new RegExp(`^\\s*(?:NOT\\s+EXISTS\\s*\\(|${ID}(?:\\s*\\.\\s*${ID})*\\s+NOT\\s+IN\\s*\\(\\s*SELECT\\b)`, 'i'));
+  if (!m) return false;
+  const p = M.indexOf('(', 0 + m[0].search(/\(/));
+  let q = p + 1; while (q < M.length && !(M[q] === ')' && sc.depth[q] === sc.depth[p])) q++;
+  return q < M.length && !M.slice(q + 1).trim();
+}
+function wrapOr(s) { return /\bOR\b/i.test(s) && !/^\(/.test(s.trim()) ? '(' + s + ')' : s; }
+function makeDerived(ctx, fromSql, inner, condList, kExpr, X) {
+  const name = ctx.next(), where = [], on = [], cols = new Map();
+  condList.forEach(c => {
+    const refs = aliasRefs(c);
+    if (!refs.some(r => !inner.has(r.alias))) { where.push(c); return; }
+    let s = c;
+    refs.filter(r => inner.has(r.alias)).sort((a, b) => b.start - a.start).forEach(r => {
+      const key = r.alias + '.' + norm(r.col);
+      if (!cols.has(key)) cols.set(key, { expr: c.slice(r.start, r.end).replace(/\s+/g, ''), name: 'c' + (cols.size + 1) });
+      s = s.slice(0, r.start) + name + '.' + cols.get(key).name + s.slice(r.end);
+    });
+    on.push(collapse(s));
+  });
+  const sel = ['1 AS m'];
+  if (kExpr) { sel.push(`${collapse(kExpr)} AS k`); on.unshift(`${name}.k = ${X}`); }
+  cols.forEach(v => {
+    const dup = kExpr && norm(v.expr) === norm(collapse(kExpr).replace(/\s+/g, ''));
+    const i = on.findIndex(o => o.replace(/\s+/g, '').toLowerCase() === `${name}.${v.name}=${X}`.toLowerCase() || o.replace(/\s+/g, '').toLowerCase() === `${X}=${name}.${v.name}`.toLowerCase());
+    if (dup && i > 0) { on.splice(i, 1); return; }
+    sel.push(`${v.expr} AS ${v.name}`);
+  });
+  if (!on.length) on.push('1 = 1');
+  on.forEach(o => { if (!/^[\w.\[\]]+\s*=\s*[\w.\[\]]+$/.test(o) && o !== '1 = 1' && !ctx.warnedOn) { ctx.warnedOn = true; ctx.warnings.push('One of the lookups links to the main table with something other than a plain "column = column" match, so a person could appear on more than one row. Check the counts if they look too high.'); } });
+  ctx.derived.push({ name, sel, from: fromSql, where, on });
+  return name;
+}
+function renderDerived(d) {
+  let s = `LEFT JOIN (\n    SELECT DISTINCT ${d.sel.join(', ')}\n    FROM ${d.from}`;
+  if (d.where.length) s += '\n    WHERE ' + d.where.map(w => wrapOr(render(w, '          '))).join('\n      AND ');
+  return s + `\n) ${d.name} ON ` + d.on.map(wrapOr).join(' AND ');
+}
+function parseSub(text) {
+  const sc = scan(text), n = text.length;
+  const sel = findTop(sc, /\bSELECT\b/gi, 0, n)[0]; if (!sel) return null;
+  if (findTop(sc, /\b(?:GROUP\s+BY|HAVING|UNION|ORDER\s+BY|EXCEPT|INTERSECT)\b/gi, 0, n).length) return null;
+  const from = findTop(sc, /\bFROM\b/gi, sel.end, n)[0]; if (!from) return null;
+  const where = findTop(sc, /\bWHERE\b/gi, from.end, n)[0], fEnd = where ? where.index : n;
+  const selExpr = sc.clean.slice(sel.end, from.index).trim().replace(/^DISTINCT\s+/i, '').replace(/^TOP\s*\(?\s*\d+\s*\)?\s*(PERCENT\s+)?/i, '').replace(/^DISTINCT\s+/i, '').replace(/\s+AS\s+\S+$/i, '');
+  const inner = new Set(refsIn(sc, from.index, fEnd).defined);
+  const tre = new RegExp(`\\b(?:FROM|JOIN)\\s+(${ID}(?:\\s*\\.\\s*${ID})*)`, 'gi'); let m;
+  while ((m = tre.exec(sc.masked.slice(0, fEnd)))) { const t = text.substr(m.index + m[0].length - m[1].length, m[1].length); inner.add(norm(t.split('.').pop().trim())); }
+  return { sel: selExpr, from: collapse(sc.clean.slice(from.end, fEnd)), inner, conds: where ? splitAnd(sc.clean.slice(where.end)) : [] };
+}
+function rewriteSubqueries(ctx, code) {
+  const sc = scan(code), M = sc.masked, reps = [];
+  const re = /\b(NOT\s+)?EXISTS\s*\(|\b(NOT\s+)?IN\s*\(\s*SELECT\b/gi; let m;
+  while ((m = re.exec(M))) {
+    const p = M.indexOf('(', m.index);
+    let q = p + 1; while (q < M.length && !(M[q] === ')' && sc.depth[q] === sc.depth[p])) q++;
+    if (q >= M.length) continue;
+    const isIn = !/EXISTS/i.test(m[0]), neg = !!(isIn ? m[2] : m[1]);
+    let a = m.index, X = null;
+    if (isIn) {
+      const xm = M.slice(0, m.index).match(new RegExp(`(${ID}(?:\\s*\\.\\s*${ID})*)\\s*$`));
+      if (!xm) { ctx.warnings.push('Could not read the column before an IN (SELECT ...), so that check was left as it is.'); continue; }
+      a = m.index - xm[0].length; X = code.slice(a, a + xm[1].length).replace(/\s+/g, '');
+    }
+    const sub = parseSub(sc.clean.slice(p + 1, q));
+    if (!sub) { ctx.warnings.push('A subquery with GROUP BY, HAVING, ORDER BY or UNION was left as it is. Query Studio may reject it.'); re.lastIndex = q + 1; continue; }
+    const name = makeDerived(ctx, sub.from, sub.inner, sub.conds, isIn ? sub.sel : null, X);
+    reps.push({ a, b: q + 1, text: `${name}.m IS ${neg ? '' : 'NOT '}NULL` });
+    re.lastIndex = q + 1;
+  }
+  let out = code;
+  reps.sort((x, y) => y.a - x.a).forEach(r => { out = out.slice(0, r.a) + r.text + out.slice(r.b); });
+  return { code: out, changed: reps.length > 0 };
+}
+
 function unwrap(sql) {
   const P0 = parse(sql);
   if (P0.error || P0.joins.length || !/^\(/.test(P0.base.table)) return null;
@@ -244,16 +344,17 @@ function unwrap(sql) {
   return { sql: sqlOut, warnings };
 }
 
-function build(sql, keyCol, keyVals) {
+function build(sql, keyCol, keyVals, detail) {
   const U = unwrap(sql);
-  if (U) { const r = build(U.sql, keyCol, keyVals); if (!r.error) r.warnings = U.warnings.concat(r.warnings); return r; }
+  if (U) { const r = build(U.sql, keyCol, keyVals, detail); if (!r.error) r.warnings = U.warnings.concat(r.warnings); return r; }
   const P = parse(sql);
   if (P.error) return P;
   const { sc, base, joins, joinMap, conds, selCols } = P;
   const used = new Set(selCols.map(c => c.name)), uniq = n => { let k = n, i = 2; while (used.has(k)) k = `${n}_${i++}`; used.add(k); return k; };
 
-  const groups = new Map(), items = [];
+  const groups = new Map(), items = [], filters = [];
   conds.forEach(c => {
+    if (!c.S.length && isExclusion(c.code)) { filters.push(c); return; }
     if (!c.S.length) { items.push({ kind: 'base', cond: c }); return; }
     const sig = c.S.join(',');
     let g = groups.get(sig);
@@ -261,48 +362,53 @@ function build(sql, keyCol, keyVals) {
     items.push({ kind: 'jc', cond: c, group: g }); g.conds.push(c); g.last = items[items.length - 1];
   });
   [...groups.values()].filter(g => g.conds.length > 1).forEach(g => items.splice(items.indexOf(g.last) + 1, 0, { kind: 'all', group: g }));
+  if (detail === false) for (let i = items.length - 1; i >= 0; i--) { const it = items[i]; if ((it.kind === 'row' && !it.standalone) || (it.kind === 'jc' && it.group.conds.length > 1)) items.splice(i, 1); }
   const covered = new Set([].concat(...[...groups.values()].map(g => g.S)));
   joins.filter(j => j.type === 'inner' && !covered.has(j.key)).reverse().forEach(j => items.unshift({ kind: 'row', group: { S: [j.key], conds: [], aliases: [j.alias] }, standalone: true }));
 
   const pad1 = '    ';
-  const existsBlock = (S, cs) => {
-    const list = joins.filter(j => S.includes(j.key)), p = pad1 + '    ';
-    let s = 'CASE WHEN EXISTS (\n' + p + `SELECT 1 FROM ${list[0].table} ${list[0].alias}\n`;
-    list.slice(1).forEach(j => { s += p + `JOIN ${j.table} ${j.alias}` + (j.on ? ` ON ${collapse(j.on)}` : '') + '\n'; });
-    const w = []; if (list[0].on) w.push(collapse(list[0].on));
-    cs.forEach(c => { const r = render(c.code, p + '      '); w.push(/\bOR\b/i.test(r) && !/^\(/.test(r) ? '(' + r + ')' : r); });
-    if (w.length) s += p + 'WHERE ' + w.join('\n' + p + '  AND ') + '\n';
-    return s + pad1 + ') THEN 1 ELSE 0 END';
+  const taken = new Set([base.key].concat(joins.map(j => j.key)));
+  let jn = 0;
+  const ctx = { derived: [], warnings: [], next: () => { let n; do { n = 'lk' + String(++jn).padStart(2, '0'); } while (taken.has(n)); return n; } };
+  const groupJoin = (S, cs) => {
+    const list = joins.filter(j => S.includes(j.key));
+    let from = `${list[0].table} ${list[0].alias}`;
+    list.slice(1).forEach(j => { from += ` JOIN ${j.table} ${j.alias}` + (j.on ? ` ON ${collapse(j.on)}` : ''); });
+    const condList = (list[0].on ? splitAnd(list[0].on) : []).concat(cs.map(c => c.code.trim()));
+    const name = makeDerived(ctx, from, new Set(S), condList, null, null);
+    return `CASE WHEN ${name}.m IS NOT NULL THEN 1 ELSE 0 END`;
   };
 
   const short = (t, max) => { if (t.length > max) { const cut = t.slice(0, max + 1); t = cut.lastIndexOf('_') > 4 ? cut.slice(0, cut.lastIndexOf('_')) : t.slice(0, max); } return t.replace(/_+$/, '') || 'cond'; };
   const shrink = t => t.replace(/_communication/g, '').replace(/_acknowledgement/g, '').replace(/_address/g, '').replace(/_not_null/g, '_nn').replace(/_not_blank/g, '_nb').replace(/^not_in_/, 'excl_').replace(/^users_with_/, '').replace(/^(exclude|excluding|excludng)_/, 'excl_').replace(/device_/g, 'dev_').replace(/segment_/g, 'seg_').replace(/_policy/g, '');
-  const lbl = t => { t = t.replace(/\s+/g, ' ').trim(); return t.length > 55 ? t.slice(0, 52) + '...' : t; };
+  const lbl = t => t.replace(/\s+/g, ' ').trim();
   let num = 0;
   const fname = base => { num++; return uniq('f' + String(num).padStart(2, '0') + '_' + short(shrink(base), 18)); };
-  const flags = items.map(it => {
+  const flags = items.map(it => { const d0 = ctx.derived.length; const f = (() => {
     const g = it.group, al = g ? g.aliases.join('_') : '';
     const tableTxt = g ? g.S.map(k => { const j = joinMap.get(k); return `${j.alias} (${j.table})`; }).join(' + ') : `${base.alias} (${base.table})`;
     if (it.kind === 'base') {
-      const c = it.cond, code = render(c.code, pad1 + '    ');
+      const c = it.cond, rw = rewriteSubqueries(ctx, c.code), code = rw.changed ? collapse(rw.code) : render(c.code, pad1 + '    ');
       return { name: fname(condName(sc, c)), expr: `CASE WHEN ${code} THEN 1 ELSE 0 END`, label: lbl(c.label || collapse(c.code)), src: collapse(c.code), table: tableTxt, required: true };
     }
-    if (it.kind === 'row') return { name: fname(slug(al) + '_row'), expr: existsBlock(g.S, []), label: lbl(`No ${g.aliases.join(' + ')} row`), src: 'Row exists', table: tableTxt, required: !!it.standalone };
+    if (it.kind === 'row') return { name: fname(slug(al) + '_row'), expr: groupJoin(g.S, []), label: lbl(`No ${g.aliases.join(' + ')} row`), src: 'Row exists', table: tableTxt, required: !!it.standalone };
     if (it.kind === 'jc') {
       const c = it.cond, nm = c.label ? slug(c.label) : condName(sc, c);
-      return { name: fname(nm), expr: existsBlock(g.S, [c]), label: lbl(c.label || `${g.aliases.join(' + ')}: ${collapse(c.code)}`), src: collapse(c.code), table: tableTxt, required: g.conds.length === 1 };
+      return { name: fname(nm), expr: groupJoin(g.S, [c]), label: lbl(c.label || `${g.aliases.join(' + ')}: ${collapse(c.code)}`), src: collapse(c.code), table: tableTxt, required: g.conds.length === 1 };
     }
-    return { name: fname(slug(al) + '_all'), expr: existsBlock(g.S, g.conds), label: lbl(`${g.aliases.join(' + ')}: no row meets all conditions`), src: '', table: tableTxt, required: true };
-  });
+    return { name: fname(slug(al) + '_all'), expr: groupJoin(g.S, g.conds), label: lbl(`${g.aliases.join(' + ')}: no row meets all conditions`), src: '', table: tableTxt, required: true };
+  })(); f.code = `${f.expr} AS ${f.name}` + ctx.derived.slice(d0).map(d => '\n' + renderDerived(d)).join(''); return f; });
 
   const allPass = uniq('all_pass'), firstFailed = uniq('first_failed');
   let filter = '';
   const vals = (keyVals || '').split(',').map(v => v.trim()).filter(Boolean);
   const key = (keyCol || '').trim();
-  if (vals.length && key) filter = `\nWHERE ${base.alias}.${key} ` + (vals.length === 1 ? `= ${sqlStr(vals[0])}` : `IN (${vals.map(sqlStr).join(', ')})`);
+  const whereParts = filters.map(c => render(c.code, '      '));
+  if (vals.length && key) whereParts.push(`${base.alias}.${key} ` + (vals.length === 1 ? `= ${sqlStr(vals[0])}` : `IN (${vals.map(sqlStr).join(', ')})`));
+  if (whereParts.length) filter = '\nWHERE ' + whereParts.join('\n  AND ');
 
   const selectList = selCols.map(c => c.expr).concat(flags.map(f => `${f.expr} AS ${f.name}`));
-  const inner = 'SELECT\n' + selectList.map(s => indent(s, pad1).replace(/^ {4}/, pad1)).join(',\n') + `\nFROM ${base.table} ${base.alias}` + filter;
+  const inner = 'SELECT\n' + selectList.map(s => indent(s, pad1).replace(/^ {4}/, pad1)).join(',\n') + `\nFROM ${base.table} ${base.alias}` + ctx.derived.map(d => '\n' + renderDerived(d)).join('') + filter;
 
   const req = flags.filter(f => f.required);
   const passExpr = req.length ? 'CASE WHEN ' + req.map(f => `x.${f.name} = 1`).join('\n          AND ') + ' THEN 1 ELSE 0 END' : '1';
@@ -316,7 +422,7 @@ function build(sql, keyCol, keyVals) {
     return `    SUM(CASE WHEN x.${f.name} = 0 THEN 1 ELSE 0 END) AS ${k},`;
   }).join('\n') + `\n    SUM(${req.length ? passExpr.replace(/\n {10}/g, '\n              ') : '1'}) AS records_passing_all\nFROM (\n${indent(inner, pad1)}\n) x`;
 
-  return { flagsSql: outer, countsSql: counts, flags, warnings: P.warnings, base, joins, conds, selCols, allPass, firstFailed, defaultKey: selCols.length ? selCols[0].name : '' };
+  return { flagsSql: outer, countsSql: counts, flags, filters: filters.map(c => ({ label: lbl(c.label || collapse(c.code)), src: collapse(c.code), code: 'AND ' + render(c.code, '    ') })), warnings: P.warnings.concat(ctx.warnings), base, joins, conds, selCols, allPass, firstFailed, defaultKey: selCols.length ? selCols[0].name : '' };
 }
 
 
@@ -338,6 +444,10 @@ function build(sql, keyCol, keyVals) {
       last = re.lastIndex;
     }
     return out + esc(line.slice(last));
+  }
+
+  function sqlBlock(code) {
+    return '<details class="sqlblock"><summary>Show SQL</summary><pre>' + code.split('\n').map(function (l) { return hl(l); }).join('\n') + '</pre></details>';
   }
 
   var tab = 'flags', result = null, keyTouched = false, timer = null;
@@ -363,17 +473,22 @@ function build(sql, keyCol, keyVals) {
 
     var req = result.flags.filter(function (f) { return f.required; }).length;
     var excl = result.conds.filter(function (c) { return /^\s*NOT\s+EXISTS|\bNOT\s+IN\s*\(\s*SELECT/i.test(c.code); }).length;
-    $('stats').innerHTML = [['flags', result.flags.length], ['required', req], ['joined tables', result.joins.length], ['exclusions', excl]]
+    $('stats').innerHTML = [['flags', result.flags.length], ['required', req], ['joined tables', result.joins.length], ['exclusion filters', result.filters.length]]
       .map(function (s) { return '<span class="stat"><b>' + s[1] + '</b>' + s[0] + '</span>'; }).join('');
 
     var html = '', lastTable = null;
     result.flags.forEach(function (f, i) {
       if (f.table !== lastTable) { html += '<tr class="group"><td colspan="5">' + esc(f.table) + '</td></tr>'; lastTable = f.table; }
-      var showSrc = f.src && f.src !== 'Row exists' && f.src !== f.label && f.label.indexOf(f.src) < 0;
-      html += '<tr><td class="num">' + (i + 1) + '</td><td><code>' + esc(f.name) + '</code></td><td class="chk">' + esc(f.label) +
-        (showSrc ? '<span class="src">' + esc(f.src.length > 200 ? f.src.slice(0, 200) + '...' : f.src) + '</span>' : '') +
+      html += '<tr><td class="num">' + (i + 1) + '</td><td><code>' + esc(f.name) + '</code></td><td class="chk">' + esc(f.label) + sqlBlock(f.code) +
         '</td><td class="tblname">' + esc(f.table.split(' (')[0]) + '</td><td>' + (f.required ? '<span class="chip req">Required</span>' : '<span class="chip det">Detail</span>') + '</td></tr>';
     });
+    if (result.filters.length) {
+      html += '<tr class="group"><td colspan="5">Exclusions: kept as filters in WHERE, no flag</td></tr>';
+      result.filters.forEach(function (f) {
+        html += '<tr><td class="num">-</td><td><span class="tblname">filter</span></td><td class="chk">' + esc(f.label) + sqlBlock(f.code) +
+          '</td><td class="tblname"></td><td><span class="chip det">Filter</span></td></tr>';
+      });
+    }
     $('flagRows').innerHTML = html;
 
     var cols = result.selCols.map(function (c) { return c.out; });
