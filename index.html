@@ -44,6 +44,7 @@
           <div class="tabs" role="tablist" aria-label="Query type">
             <button class="tab" role="tab" id="tabFlags" aria-selected="true" type="button">Flags per person</button>
             <button class="tab" role="tab" id="tabCounts" aria-selected="false" type="button">Failure counts</button>
+            <button class="tab" role="tab" id="tabWf" aria-selected="false" type="button">Waterfall</button>
           </div>
           <button class="btn primary" id="copyBtn" type="button">Copy query</button>
         </div>
@@ -53,11 +54,30 @@
     </div>
   </div>
 
+  <section class="wf" id="wf" hidden>
+    <div class="ref-head">
+      <div>
+        <h2>Waterfall</h2>
+        <p>Copy the waterfall query, run it in Query Studio, then paste the single result row below. Each step shows how many people it removes and how many are left. Use the arrows to change the step order; the query updates to match.</p>
+      </div>
+    </div>
+    <div class="wf-paste">
+      <label for="wfPaste">Paste the result row</label>
+      <div class="wf-paste-row">
+        <textarea id="wfPaste" rows="2" spellcheck="false" placeholder="e.g. 250000  210000  205000  ..."></textarea>
+        <button class="btn" id="wfClear" type="button">Clear</button>
+      </div>
+      <div class="note" id="wfMsg" hidden></div>
+    </div>
+    <div class="wf-head"><span></span><span>Step</span><span>Remaining vs removed</span><span>Removed</span><span>Left</span></div>
+    <div id="wfRows"></div>
+  </section>
+
   <section class="ref">
     <div class="ref-head">
       <div>
         <h2>What each flag checks</h2>
-        <p>1 means the person passes the check, 0 means they fail it. <b>Required</b> flags decide all_pass. <b>Detail</b> flags break a joined table down so you can see which filter on it is the problem.</p>
+        <p>1 means the person passes the check, 0 means they fail it. <b>Required</b> flags decide all_pass. <b>Detail</b> flags split a joined table into one flag per condition. Exclusions (NOT IN / NOT EXISTS) get no flag: they stay as filters, so excluded people are left out of the results.</p>
       </div>
       <div class="legend"><span><span class="chip req">Required</span></span><span><span class="chip det">Detail</span></span></div>
     </div>
