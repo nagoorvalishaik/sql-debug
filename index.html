@@ -50,6 +50,7 @@
         </div>
       </div>
       <div class="code" id="code"></div>
+      <div class="qs" id="qs" hidden></div>
       <div class="notes" id="notes"></div>
     </div>
   </div>
@@ -58,13 +59,13 @@
     <div class="ref-head">
       <div>
         <h2>Waterfall</h2>
-        <p>Copy the waterfall query, run it in Query Studio, then paste the single result row below. Each step shows how many people it removes and how many are left. Use the arrows to change the step order; the query updates to match.</p>
+        <p>Run the waterfall query once in Query Studio and paste all its result rows below (each row is a <b>combo</b> and a count <b>n</b>). Each step then shows how many people it removes and how many are left.</p><p>After that, everything updates without running the query again: <b>arrows</b> change the step order and the <b>switch</b> turns a step off to see the audience without it (what-if).</p>
       </div>
     </div>
     <div class="wf-paste">
-      <label for="wfPaste">Paste the result row</label>
+      <label for="wfPaste">Paste the result rows</label>
       <div class="wf-paste-row">
-        <textarea id="wfPaste" rows="2" spellcheck="false" placeholder="e.g. 250000  210000  205000  ..."></textarea>
+        <textarea id="wfPaste" rows="4" spellcheck="false" placeholder="combo          n&#10;c1111111111111 3150&#10;c0111111111111 40000&#10;..."></textarea>
         <button class="btn" id="wfClear" type="button">Clear</button>
       </div>
       <div class="note" id="wfMsg" hidden></div>
