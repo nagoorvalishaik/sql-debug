@@ -316,6 +316,32 @@ function rewriteSubqueries(ctx, code) {
   return { code: out, changed: reps.length > 0 };
 }
 
+function waterfallSql(res, order) {
+  const steps = order.map(id => res.wfSteps.find(s => s.id === id)).filter(Boolean);
+  const cols = ['    COUNT(*) AS s00_all'], acc = [];
+  steps.forEach((s, i) => {
+    acc.push('x.' + s.id + ' = 1');
+    const parts = []; for (let k = 0; k < acc.length; k += 3) parts.push(acc.slice(k, k + 3).join(' AND '));
+    cols.push(`    SUM(CASE WHEN ${parts.join('\n              AND ')} THEN 1 ELSE 0 END) AS s${String(i + 1).padStart(2, '0')}_${s.id.replace(/^[fe]\d\d_/, '')}`);
+  });
+  return `SELECT\n${cols.join(',\n')}\nFROM (\n${indent(res.wfInner, '    ')}\n) x`;
+}
+function parseWaterfall(txt, expected) {
+  const lines = txt.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const isNum = t => /^-?\d+(?:\.\d+)?$/.test(t);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].split(/[\t,;|]+|\s+/).filter(Boolean);
+    if (t.length === expected && t.every(isNum)) return t.map(Number);
+  }
+  const pairs = [];
+  lines.forEach(l => { const m = l.match(/^s\d\d_\w*[\s:=,;|\t]+(-?\d+)$/i); if (m) pairs.push(Number(m[1])); });
+  if (pairs.length === expected) return pairs;
+  const all = [];
+  lines.forEach(l => { if (!/[A-Za-z]/.test(l)) l.split(/[^0-9-]+/).filter(isNum).forEach(t => all.push(Number(t))); });
+  if (all.length === expected) return all;
+  return { error: `Expected ${expected} numbers (s00_all plus one per step), but found ${Math.max(all.length, pairs.length)}. Paste the single result row from the waterfall query.` };
+}
+
 function unwrap(sql) {
   const P0 = parse(sql);
   if (P0.error || P0.joins.length || !/^\(/.test(P0.base.table)) return null;
@@ -396,15 +422,16 @@ function build(sql, keyCol, keyVals, detail) {
       const c = it.cond, nm = c.label ? slug(c.label) : condName(sc, c);
       return { name: fname(nm), expr: groupJoin(g.S, [c]), label: lbl(c.label || `${g.aliases.join(' + ')}: ${collapse(c.code)}`), src: collapse(c.code), table: tableTxt, required: g.conds.length === 1 };
     }
-    return { name: fname(slug(al) + '_all'), expr: groupJoin(g.S, g.conds), label: lbl(`${g.aliases.join(' + ')}: no row meets all conditions`), src: '', table: tableTxt, required: true };
+    return { name: fname(slug(al) + '_all'), expr: groupJoin(g.S, g.conds), label: lbl(`${g.aliases.join(' + ')}: has a row meeting all its conditions`), src: '', table: tableTxt, required: true };
   })(); f.code = `${f.expr} AS ${f.name}` + ctx.derived.slice(d0).map(d => '\n' + renderDerived(d)).join(''); return f; });
 
   const allPass = uniq('all_pass'), firstFailed = uniq('first_failed');
   let filter = '';
   const vals = (keyVals || '').split(',').map(v => v.trim()).filter(Boolean);
   const key = (keyCol || '').trim();
+  const keyCond = vals.length && key ? `${base.alias}.${key} ` + (vals.length === 1 ? `= ${sqlStr(vals[0])}` : `IN (${vals.map(sqlStr).join(', ')})`) : null;
   const whereParts = filters.map(c => render(c.code, '      '));
-  if (vals.length && key) whereParts.push(`${base.alias}.${key} ` + (vals.length === 1 ? `= ${sqlStr(vals[0])}` : `IN (${vals.map(sqlStr).join(', ')})`));
+  if (keyCond) whereParts.push(keyCond);
   if (whereParts.length) filter = '\nWHERE ' + whereParts.join('\n  AND ');
 
   const selectList = selCols.map(c => c.expr).concat(flags.map(f => `${f.expr} AS ${f.name}`));
@@ -422,7 +449,19 @@ function build(sql, keyCol, keyVals, detail) {
     return `    SUM(CASE WHEN x.${f.name} = 0 THEN 1 ELSE 0 END) AS ${k},`;
   }).join('\n') + `\n    SUM(${req.length ? passExpr.replace(/\n {10}/g, '\n              ') : '1'}) AS records_passing_all\nFROM (\n${indent(inner, pad1)}\n) x`;
 
-  return { flagsSql: outer, countsSql: counts, flags, filters: filters.map(c => ({ label: lbl(c.label || collapse(c.code)), src: collapse(c.code), code: 'AND ' + render(c.code, '    ') })), warnings: P.warnings.concat(ctx.warnings), base, joins, conds, selCols, allPass, firstFailed, defaultKey: selCols.length ? selCols[0].name : '' };
+  /* Waterfall: required flags plus every exclusion as a step (exclusions become lookups here only) */
+  const exFlags = filters.map((c, i) => {
+    const rw = rewriteSubqueries(ctx, c.code);
+    const nm = uniq('e' + String(i + 1).padStart(2, '0') + '_' + short(shrink(c.label ? slug(c.label) : condName(sc, c)), 18));
+    return { name: nm, expr: `CASE WHEN ${rw.changed ? collapse(rw.code) : render(c.code, pad1 + '    ')} THEN 1 ELSE 0 END`, label: lbl(c.label || collapse(c.code)) };
+  });
+  const wfFlags = req.concat(exFlags);
+  const wfDerived = ctx.derived.filter(d => wfFlags.some(f => f.expr.indexOf(d.name + '.') >= 0));
+  const wfInner = 'SELECT\n' + (wfFlags.length ? wfFlags.map(f => indent(`${f.expr} AS ${f.name}`, pad1)) : [pad1 + '1 AS no_steps']).join(',\n') +
+    `\nFROM ${base.table} ${base.alias}` + wfDerived.map(d => '\n' + renderDerived(d)).join('') + (keyCond ? '\nWHERE ' + keyCond : '');
+  const wfSteps = req.map(f => ({ id: f.name, label: f.label, kind: 'include' })).concat(exFlags.map(f => ({ id: f.name, label: f.label, kind: 'exclude' })));
+
+  return { flagsSql: outer, countsSql: counts, wfInner, wfSteps, baseTable: base.table, flags, filters: filters.map(c => ({ label: lbl(c.label || collapse(c.code)), src: collapse(c.code), code: 'AND ' + render(c.code, '    ') })), warnings: P.warnings.concat(ctx.warnings), base, joins, conds, selCols, allPass, firstFailed, defaultKey: selCols.length ? selCols[0].name : '' };
 }
 
 
@@ -452,11 +491,49 @@ function build(sql, keyCol, keyVals, detail) {
 
   var tab = 'flags', result = null, keyTouched = false, timer = null;
 
-  function currentSql() { return result && !result.error ? (tab === 'flags' ? result.flagsSql : result.countsSql) : ''; }
+  var wfOrder = [], wfNums = null, wfMsg = '';
+  function currentSql() { return result && !result.error ? (tab === 'flags' ? result.flagsSql : tab === 'counts' ? result.countsSql : waterfallSql(result, wfOrder)) : ''; }
+  function fmt(n) { return Number(n).toLocaleString('en-US'); }
+  function pct(a, b) { return b ? (a / b * 100).toFixed(1).replace(/\.0$/, '') + '%' : '0%'; }
+
+  function renderWf() {
+    var box = $('wf');
+    box.hidden = tab !== 'wf' || !result || !!result.error;
+    if (box.hidden) return;
+    var steps = wfOrder.map(function (id) { return result.wfSteps.filter(function (s) { return s.id === id; })[0]; });
+    var n = wfNums, total = n ? n[0] : 0, worst = -1, worstDrop = -1;
+    if (n) for (var i = 1; i < n.length; i++) if (n[i - 1] - n[i] > worstDrop) { worstDrop = n[i - 1] - n[i]; worst = i; }
+    function bar(rem, prev) {
+      if (!n) return '<div class="wf-track empty"></div>';
+      var w = total ? rem / total * 100 : 0, d = total ? (prev - rem) / total * 100 : 0;
+      return '<div class="wf-track"><span class="wf-keep" style="width:' + w + '%"></span>' + (d > 0 ? '<span class="wf-drop" style="left:' + w + '%;width:' + d + '%"></span>' : '') + '</div>';
+    }
+    var html = '<div class="wf-row wf-start"><div class="wf-move"></div><div class="wf-lbl"><b>Everyone in ' + esc(result.baseTable) + '</b></div>' + bar(total, total) +
+      '<div class="wf-num wf-rm"></div><div class="wf-num wf-left"><b>' + (n ? fmt(total) : '-') + '</b>' + (n ? '<small>100%</small>' : '') + '</div></div>';
+    steps.forEach(function (s, i) {
+      var rem = n ? n[i + 1] : 0, prev = n ? n[i] : 0, drop = prev - rem;
+      html += '<div class="wf-row' + (n && worst === i + 1 && worstDrop > 0 ? ' worst' : '') + '">' +
+        '<div class="wf-move"><button class="mv" type="button" data-i="' + i + '" data-d="-1" aria-label="Move up"' + (i === 0 ? ' disabled' : '') + '>&#9650;</button>' +
+        '<button class="mv" type="button" data-i="' + i + '" data-d="1" aria-label="Move down"' + (i === steps.length - 1 ? ' disabled' : '') + '>&#9660;</button></div>' +
+        '<div class="wf-lbl"><span class="wf-step">' + (i + 1) + '</span> ' + esc(s.label) + ' <span class="chip ' + (s.kind === 'include' ? 'req' : 'exc') + '">' + (s.kind === 'include' ? 'Keep if passes' : 'Exclusion') + '</span>' +
+        '<code class="wf-id">' + esc(s.id) + '</code>' + (n && worst === i + 1 && worstDrop > 0 ? '<span class="wf-flag">Biggest drop</span>' : '') + '</div>' +
+        bar(rem, prev) +
+        '<div class="wf-num wf-rm">' + (n ? '<span class="neg">&minus;' + fmt(drop) + '</span><small>' + pct(drop, prev) + ' of previous</small>' : '-') + '</div>' +
+        '<div class="wf-num wf-left">' + (n ? '<b>' + fmt(rem) + '</b><small>' + pct(rem, total) + ' of start</small>' : '-') + '</div></div>';
+    });
+    if (n) html += '<div class="wf-row wf-end"><div class="wf-move"></div><div class="wf-lbl"><b>Final audience</b></div>' + bar(n[n.length - 1], n[n.length - 1]) +
+      '<div class="wf-num wf-rm"><span class="neg">&minus;' + fmt(total - n[n.length - 1]) + '</span><small>removed in total</small></div><div class="wf-num wf-left"><b>' + fmt(n[n.length - 1]) + '</b><small>' + pct(n[n.length - 1], total) + ' of start</small></div></div>';
+    $('wfRows').innerHTML = html;
+    var msg = $('wfMsg');
+    msg.textContent = wfMsg; msg.hidden = !wfMsg;
+    msg.className = 'note' + (/^Expected|should|changed/.test(wfMsg) ? '' : ' info');
+  }
+
 
   function paint() {
     var notes = $('notes'), code = $('code');
     notes.innerHTML = '';
+    renderWf();
     if (!result || result.error) {
       code.innerHTML = '<div class="empty">The debug query appears here once your query can be read.</div>';
       if (result && result.error) notes.innerHTML = '<div class="note err">' + esc(result.error) + '</div>';
@@ -469,6 +546,7 @@ function build(sql, keyCol, keyVals, detail) {
     code.innerHTML = '<table>' + rows + '</table>';
 
     result.warnings.forEach(function (w) { var d = document.createElement('div'); d.className = 'note'; d.textContent = w; notes.appendChild(d); });
+    if (tab === 'wf') { var dw = document.createElement('div'); dw.className = 'note info'; dw.textContent = 'Returns a single row: s00_all is everyone in the main table, and each next column is how many people are left after that step. Exclusions are steps here too. Run it in Query Studio and paste the row into the Waterfall panel below.'; notes.appendChild(dw); }
     if (tab === 'counts') { var d = document.createElement('div'); d.className = 'note info'; d.textContent = 'Returns a single row: how many people fail each flag, and how many pass everything. Run it in Query Studio to see where your audience drops off.'; notes.appendChild(d); }
 
     var req = result.flags.filter(function (f) { return f.required; }).length;
@@ -505,7 +583,13 @@ function build(sql, keyCol, keyVals, detail) {
       $('keyCol').value = r.defaultKey;
       r = build(sql, r.defaultKey, $('keyVal').value);
     }
-    result = r; paint();
+    result = r;
+    if (!r.error) {
+      var ids = r.wfSteps.map(function (s) { return s.id; });
+      var same = ids.length === wfOrder.length && ids.every(function (id) { return wfOrder.indexOf(id) >= 0; });
+      if (!same) { wfOrder = ids; wfNums = null; wfMsg = ''; $('wfPaste').value = ''; }
+    }
+    paint();
   }
   function soon() { clearTimeout(timer); timer = setTimeout(run, 200); }
 
@@ -514,9 +598,32 @@ function build(sql, keyCol, keyVals, detail) {
   $('keyVal').addEventListener('input', soon);
   $('keyCol').addEventListener('input', function () { keyTouched = true; soon(); });
   $('clearBtn').addEventListener('click', function () { $('src').value = ''; $('keyVal').value = ''; $('keyCol').value = ''; keyTouched = false; run(); $('src').focus(); });
-  function setTab(t) { tab = t; $('tabFlags').setAttribute('aria-selected', t === 'flags'); $('tabCounts').setAttribute('aria-selected', t === 'counts'); paint(); }
+  function setTab(t) { tab = t; $('tabFlags').setAttribute('aria-selected', t === 'flags'); $('tabCounts').setAttribute('aria-selected', t === 'counts'); $('tabWf').setAttribute('aria-selected', t === 'wf'); paint(); }
   $('tabFlags').addEventListener('click', function () { setTab('flags'); });
   $('tabCounts').addEventListener('click', function () { setTab('counts'); });
+  $('tabWf').addEventListener('click', function () { setTab('wf'); });
+
+  $('wfRows').addEventListener('click', function (e) {
+    var b = e.target.closest('button.mv'); if (!b || b.disabled) return;
+    var i = +b.getAttribute('data-i'), j = i + (+b.getAttribute('data-d'));
+    var t = wfOrder[i]; wfOrder[i] = wfOrder[j]; wfOrder[j] = t;
+    if (wfNums) { wfNums = null; $('wfPaste').value = ''; wfMsg = 'Step order changed. Copy the updated waterfall query, run it again, and paste the new row.'; }
+    paint();
+    var again = document.querySelector('#wfRows button.mv[data-i="' + j + '"][data-d="' + b.getAttribute('data-d') + '"]') || document.querySelector('#wfRows button.mv[data-i="' + j + '"]');
+    if (again) again.focus();
+  });
+  $('wfPaste').addEventListener('input', function () {
+    var txt = $('wfPaste').value;
+    if (!txt.trim()) { wfNums = null; wfMsg = ''; renderWf(); return; }
+    var r = parseWaterfall(txt, wfOrder.length + 1);
+    if (r.error) { wfNums = null; wfMsg = r.error; }
+    else {
+      wfNums = r; wfMsg = '';
+      for (var i = 1; i < r.length; i++) if (r[i] > r[i - 1]) { wfMsg = 'The numbers should only go down from one step to the next. Check that the row came from the current waterfall query and step order.'; break; }
+    }
+    renderWf();
+  });
+  $('wfClear').addEventListener('click', function () { $('wfPaste').value = ''; wfNums = null; wfMsg = ''; renderWf(); });
 
   $('copyBtn').addEventListener('click', function () {
     var txt = currentSql(), btn = $('copyBtn');
