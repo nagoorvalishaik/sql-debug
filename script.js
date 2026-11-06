@@ -333,6 +333,10 @@ function qsCheck(sql) {
     const seg = M.slice(m.index, t ? t.index : M.length), e = seg.search(/\bEXISTS\s*\(|\bIN\s*\(\s*SELECT\b/i);
     if (e >= 0) add(m.index + e, 'sub', 'A subquery (EXISTS or IN (SELECT ...)) inside CASE WHEN. Query Studio rejects subqueries in the SELECT list.');
   }
+  if (/\bFROM\s*\(\s*SELECT\b/i.test(M)) {
+    const sq = /\bEXISTS\s*\(|\bIN\s*\(\s*SELECT\b/gi;
+    while ((m = sq.exec(M))) add(m.index, 'wsub', 'A subquery (EXISTS / IN (SELECT ...)) inside a wrapped query. Query Studio rejects this with "from is not a known data extension".');
+  }
   const star = /\*/g;
   while ((m = star.exec(M))) {
     const i = m.index, before = M.slice(0, i).replace(/\s+$/, ''), after = M.slice(i + 1).replace(/^\s+/, '');
@@ -342,7 +346,10 @@ function qsCheck(sql) {
     else add(i, 'mul', 'Multiplication (*). Query Studio rejects it here. Use CASE WHEN ... AND ... THEN 1 ELSE 0 END instead.');
   }
   const as = /\bAS\s+([\w#@$]+)/gi;
-  while ((m = as.exec(M))) if (m[1].length > 60) add(m.index, 'len', `Column name ${m[1].slice(0, 30)}... is longer than 60 characters.`);
+  while ((m = as.exec(M))) {
+    if (m[1].length > 60) add(m.index, 'len', `Column name ${m[1].slice(0, 30)}... is longer than 60 characters.`);
+    if (/(^|_)all(_|$)/i.test(m[1])) add(m.index, 'allw', `Column name ${m[1]} contains the word "all". Query Studio drops it and reports an invalid column name.`);
+  }
   return issues;
 }
 
@@ -424,7 +431,8 @@ function build(sql, keyCol, keyVals, detail) {
   const shrink = t => t.replace(/_communication/g, '').replace(/_acknowledgement/g, '').replace(/_address/g, '').replace(/_not_null/g, '_nn').replace(/_not_blank/g, '_nb').replace(/^not_in_/, 'excl_').replace(/^users_with_/, '').replace(/^(exclude|excluding|excludng)_/, 'excl_').replace(/device_/g, 'dev_').replace(/segment_/g, 'seg_').replace(/_policy/g, '');
   const lbl = t => t.replace(/\s+/g, ' ').trim();
   let num = 0;
-  const fname = base => { num++; return uniq('f' + String(num).padStart(2, '0') + '_' + short(shrink(base), 18)); };
+  const noAll = t => t.replace(/(^|_)all(?=_|$)/gi, '$1every');
+  const fname = base => { num++; return uniq('f' + String(num).padStart(2, '0') + '_' + noAll(short(shrink(base), 18))); };
   const flags = items.map(it => { const d0 = ctx.derived.length; const f = (() => {
     const g = it.group, al = g ? g.aliases.join('_') : '';
     const tableTxt = g ? g.S.map(k => { const j = joinMap.get(k); return `${j.alias} (${j.table})`; }).join(' + ') : `${base.alias} (${base.table})`;
@@ -437,45 +445,46 @@ function build(sql, keyCol, keyVals, detail) {
       const c = it.cond, nm = c.label ? slug(c.label) : condName(sc, c);
       return { name: fname(nm), expr: groupJoin(g.S, [c]), label: lbl(c.label || `${g.aliases.join(' + ')}: ${collapse(c.code)}`), src: collapse(c.code), table: tableTxt, required: g.conds.length === 1 };
     }
-    return { name: fname(slug(al) + '_all'), expr: groupJoin(g.S, g.conds), label: lbl(`${g.aliases.join(' + ')}: has a row meeting all its conditions`), src: '', table: tableTxt, required: true };
+    return { name: fname(slug(al) + '_match'), expr: groupJoin(g.S, g.conds), label: lbl(`${g.aliases.join(' + ')}: has a row meeting all its conditions`), src: '', table: tableTxt, required: true };
   })(); f.code = `${f.expr} AS ${f.name}` + ctx.derived.slice(d0).map(d => '\n' + renderDerived(d)).join(''); return f; });
 
-  const allPass = uniq('all_pass'), firstFailed = uniq('first_failed');
-  let filter = '';
+  const allPass = uniq('passed'), firstFailed = uniq('first_failed');
   const vals = (keyVals || '').split(',').map(v => v.trim()).filter(Boolean);
   const key = (keyCol || '').trim();
   const keyCond = vals.length && key ? `${base.alias}.${key} ` + (vals.length === 1 ? `= ${sqlStr(vals[0])}` : `IN (${vals.map(sqlStr).join(', ')})`) : null;
-  const whereParts = filters.map(c => render(c.code, '      '));
-  if (keyCond) whereParts.push(keyCond);
-  if (whereParts.length) filter = '\nWHERE ' + whereParts.join('\n  AND ');
 
-  const selectList = selCols.map(c => c.expr).concat(flags.map(f => `${f.expr} AS ${f.name}`));
-  const inner = 'SELECT\n' + selectList.map(s => indent(s, pad1).replace(/^ {4}/, pad1)).join(',\n') + `\nFROM ${base.table} ${base.alias}` + ctx.derived.map(d => '\n' + renderDerived(d)).join('') + filter;
+  /* Exclusions (NOT IN / NOT EXISTS) become LEFT JOIN lookups with a 1/0 column, filtered in the outer layer.
+     Query Studio rejects these subqueries inside a wrapped query, so no subquery is left anywhere. */
+  const exFlags = filters.map((c, i) => {
+    const d0 = ctx.derived.length, rw = rewriteSubqueries(ctx, c.code);
+    const nm = uniq('e' + String(i + 1).padStart(2, '0') + '_' + noAll(short(shrink(c.label ? slug(c.label) : condName(sc, c)), 18)));
+    const expr = `CASE WHEN ${rw.changed ? collapse(rw.code) : render(c.code, pad1 + '    ')} THEN 1 ELSE 0 END`;
+    return { name: nm, expr, label: lbl(c.label || collapse(c.code)), src: collapse(c.code), code: `${expr} AS ${nm}` + ctx.derived.slice(d0).map(d => '\n' + renderDerived(d)).join('') };
+  });
+  const exWhere = exFlags.length ? '\nWHERE ' + exFlags.map(f => `x.${f.name} = 1`).join('\n  AND ') : '';
+
+  const selectList = selCols.map(c => c.expr).concat(flags.map(f => `${f.expr} AS ${f.name}`), exFlags.map(f => `${f.expr} AS ${f.name}`));
+  const inner = 'SELECT\n' + selectList.map(s => indent(s, pad1).replace(/^ {4}/, pad1)).join(',\n') + `\nFROM ${base.table} ${base.alias}` + ctx.derived.map(d => '\n' + renderDerived(d)).join('') + (keyCond ? '\nWHERE ' + keyCond : '');
 
   const req = flags.filter(f => f.required);
   const passExpr = req.length ? 'CASE WHEN ' + req.map(f => `x.${f.name} = 1`).join('\n          AND ') + ' THEN 1 ELSE 0 END' : '1';
   const failCase = 'CASE\n' + flags.map(f => `        WHEN x.${f.name} = 0 THEN ${sqlStr(f.name)}`).join('\n') + "\n        ELSE 'PASS'\n    END";
   const outerCols = selCols.map(c => `    x.${c.out}`).concat(flags.map(f => `    x.${f.name}`), [`    ${passExpr} AS ${allPass}`, `    ${flags.length ? failCase : "'PASS'"} AS ${firstFailed}`]);
-  const outer = `SELECT\n${outerCols.join(',\n')}\nFROM (\n${indent(inner, pad1)}\n) x`;
+  const outer = `SELECT\n${outerCols.join(',\n')}\nFROM (\n${indent(inner, pad1)}\n) x` + exWhere;
 
   const failNames = new Set();
   const counts = 'SELECT\n    COUNT(*) AS total_records,\n' + flags.map(f => {
     let n = 'fail_' + f.name.replace(/^f_/, ''), k = n, i = 2; while (failNames.has(k)) k = `${n}_${i++}`; failNames.add(k);
     return `    SUM(CASE WHEN x.${f.name} = 0 THEN 1 ELSE 0 END) AS ${k},`;
-  }).join('\n') + `\n    SUM(${req.length ? passExpr.replace(/\n {10}/g, '\n              ') : '1'}) AS records_passing_all\nFROM (\n${indent(inner, pad1)}\n) x`;
+  }).join('\n') + `\n    SUM(${req.length ? passExpr.replace(/\n {10}/g, '\n              ') : '1'}) AS records_passing\nFROM (\n${indent(inner, pad1)}\n) x` + exWhere;
 
-  /* Waterfall: required flags plus every exclusion as a step (exclusions become lookups here only) */
-  const exFlags = filters.map((c, i) => {
-    const rw = rewriteSubqueries(ctx, c.code);
-    const nm = uniq('e' + String(i + 1).padStart(2, '0') + '_' + short(shrink(c.label ? slug(c.label) : condName(sc, c)), 18));
-    return { name: nm, expr: `CASE WHEN ${rw.changed ? collapse(rw.code) : render(c.code, pad1 + '    ')} THEN 1 ELSE 0 END`, label: lbl(c.label || collapse(c.code)) };
-  });
+  /* Waterfall: required flags plus every exclusion as a step */
   const wfFlags = req.concat(exFlags);
   const wfDerived = ctx.derived.filter(d => wfFlags.some(f => f.expr.indexOf(d.name + '.') >= 0));
   const wfFrom = `FROM ${base.table} ${base.alias}` + wfDerived.map(d => '\n' + renderDerived(d)).join('') + (keyCond ? '\nWHERE ' + keyCond : '');
   const wfSteps = req.map(f => ({ id: f.name, label: f.label, kind: 'include' })).concat(exFlags.map(f => ({ id: f.name, label: f.label, kind: 'exclude' })));
 
-  return { flagsSql: outer, countsSql: counts, wfFrom, wfFlags, wfSteps, baseTable: base.table, flags, filters: filters.map(c => ({ label: lbl(c.label || collapse(c.code)), src: collapse(c.code), code: 'AND ' + render(c.code, '    ') })), warnings: P.warnings.concat(ctx.warnings), base, joins, conds, selCols, allPass, firstFailed, defaultKey: selCols.length ? selCols[0].name : '' };
+  return { flagsSql: outer, countsSql: counts, wfFrom, wfFlags, wfSteps, baseTable: base.table, flags, filters: exFlags.map(f => ({ label: f.label, src: f.src, code: f.code, name: f.name })), warnings: P.warnings.concat(ctx.warnings), base, joins, conds, selCols, allPass, firstFailed, defaultKey: selCols.length ? selCols[0].name : '' };
 }
 
 
@@ -485,7 +494,7 @@ function build(sql, keyCol, keyVals, detail) {
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   var KWS = 'SELECT|FROM|WHERE|AND|OR|NOT|EXISTS|CASE|WHEN|THEN|ELSE|END|AS|IN|IS|NULL|JOIN|LEFT|RIGHT|INNER|OUTER|ON|SUM|COUNT|LIKE|BETWEEN|DISTINCT|TOP|CONVERT|CAST|DATEADD|GETDATE|CONCAT|ISNULL|COALESCE|DATE|YEAR';
   function hl(line) {
-    var re = new RegExp("('(?:[^']|'')*'?)|(/\\*.*?\\*/)|\\b(f\\d\\d_\\w+|all_pass|first_failed)\\b|\\b(" + KWS + ")\\b|\\b(\\d+(?:\\.\\d+)?)\\b", 'gi');
+    var re = new RegExp("('(?:[^']|'')*'?)|(/\\*.*?\\*/)|\\b(f\\d\\d_\\w+|passed|first_failed)\\b|\\b(" + KWS + ")\\b|\\b(\\d+(?:\\.\\d+)?)\\b", 'gi');
     var out = '', last = 0, m;
     while ((m = re.exec(line))) {
       out += esc(line.slice(last, m.index));
@@ -634,9 +643,9 @@ function build(sql, keyCol, keyVals, detail) {
         '</td><td class="tblname">' + esc(f.table.split(' (')[0]) + '</td><td>' + (f.required ? '<span class="chip req">Required</span>' : '<span class="chip det">Detail</span>') + '</td></tr>';
     });
     if (result.filters.length) {
-      html += '<tr class="group"><td colspan="5">Exclusions: kept as filters in WHERE, no flag</td></tr>';
+      html += '<tr class="group"><td colspan="5">Exclusions: people who match are filtered out (x.eNN = 1 in the outer WHERE)</td></tr>';
       result.filters.forEach(function (f) {
-        html += '<tr><td class="num">-</td><td><span class="tblname">filter</span></td><td class="chk">' + esc(f.label) + sqlBlock(f.code) +
+        html += '<tr><td class="num">-</td><td><code>' + esc(f.name) + '</code></td><td class="chk">' + esc(f.label) + sqlBlock(f.code) +
           '</td><td class="tblname"></td><td><span class="chip det">Filter</span></td></tr>';
       });
     }
