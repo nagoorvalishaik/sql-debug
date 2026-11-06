@@ -11,7 +11,7 @@
   <header>
     <div>
       <h1>SQL Debug Query Generator</h1>
-      <p class="lede">Paste a query and copy back a version that shows, for every person, which condition they pass (1) or fail (0), plus <b>all_pass</b> and <b>first_failed</b>. Runs in your browser only.</p>
+      <p class="lede">Paste a query and copy back a version that shows, for every person, which condition they pass (1) or fail (0), plus <b>passed</b> and <b>first_failed</b>. Runs in your browser only.</p>
     </div>
     <div class="stats" id="stats"></div>
   </header>
@@ -82,7 +82,7 @@
     <div class="ref-head">
       <div>
         <h2>What each flag checks</h2>
-        <p>1 means the person passes the check, 0 means they fail it. <b>Required</b> flags decide all_pass. <b>Detail</b> flags split a joined table into one flag per condition. Exclusions (NOT IN / NOT EXISTS) get no flag: they stay as filters, so excluded people are left out of the results.</p>
+        <p>1 means the person passes the check, 0 means they fail it. <b>Required</b> flags decide passed. <b>Detail</b> flags split a joined table into one flag per condition. Exclusions (NOT IN / NOT EXISTS) are turned into lookups and filtered out, so excluded people are left out of the results and don't count as failures.</p>
       </div>
       <div class="legend"><span><span class="chip req">Required</span></span><span><span class="chip det">Detail</span></span></div>
     </div>
