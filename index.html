@@ -55,6 +55,33 @@
     </div>
   </div>
 
+  <section class="wf" id="fc" hidden>
+    <div class="ref-head">
+      <div>
+        <h2>Failure counts</h2>
+        <p>Run the Failure counts query in Query Studio and paste the result row below. Each bar shows how many people fail that check on its own. One person can fail several checks, so the bars overlap and don't add up to the total.</p>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Sort order">
+        <button class="tab" role="tab" id="fcSortQ" aria-selected="true" type="button">Query order</button>
+        <button class="tab" role="tab" id="fcSortM" aria-selected="false" type="button">Most failures</button>
+      </div>
+    </div>
+    <div class="wf-paste">
+      <label for="fcPaste">Paste the result row</label>
+      <div class="wf-paste-row">
+        <textarea id="fcPaste" rows="3" spellcheck="false" placeholder="total_records  fail_f01_global_opt_in  ...  records_passing&#10;758149  40000  ...  782"></textarea>
+        <button class="btn" id="fcClear" type="button">Clear</button>
+      </div>
+      <div class="note" id="fcMsg" hidden></div>
+    </div>
+    <div class="wf-export" id="fcSum" hidden>
+      <div class="wf-final" id="fcTotal"></div>
+      <div class="wf-final" id="fcPass"></div>
+    </div>
+    <div class="fc-head"><span>Check</span><span>Failures out of total</span><span>Fail</span><span>Share</span></div>
+    <div id="fcRows"></div>
+  </section>
+
   <section class="wf" id="wf" hidden>
     <div class="ref-head">
       <div>
