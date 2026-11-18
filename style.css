@@ -200,3 +200,15 @@ section.wf { background: var(--surface); border: 1px solid var(--line); border-r
   .wf-left { grid-area: left; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+/* Waterfall step mode: On / Reverse / Off */
+.wf-mode { display: inline-flex; flex: none; margin-left: auto; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.wf-m { font: inherit; font-size: 11px; font-weight: 600; padding: 3px 8px; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; }
+.wf-m:first-child { border-left: 0; }
+.wf-m:hover { color: var(--ink); }
+.wf-m:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wf-m[aria-pressed=true][data-m=on] { background: var(--ok-soft); color: var(--ok); }
+.wf-m[aria-pressed=true][data-m=rev] { background: var(--accent); color: var(--accent-ink); }
+.wf-m[aria-pressed=true][data-m=off] { background: var(--line); color: var(--ink); }
+.wf-row.rev { background: var(--accent-soft); }
+.wf-not { color: var(--accent); }
+.chip.rev { background: var(--accent); color: var(--accent-ink); }
