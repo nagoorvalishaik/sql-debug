@@ -87,7 +87,7 @@
     <div class="ref-head">
       <div>
         <h2>Waterfall</h2>
-        <p>Run the waterfall query once in Query Studio and paste all its result rows below (each row is a <b>combo</b> and a count <b>n</b>). Each step then shows how many people it removes and how many are left.</p><p>After that, everything updates without running the query again: <b>arrows</b> change the step order, and each step can be set to <b>On</b> (keep people who pass), <b>Reverse</b> (keep only people who fail it) or <b>Off</b> (ignore it) to see a what-if audience.</p>
+        <p>Run the waterfall query once in Query Studio and paste all its result rows below (each row is a <b>combo</b> and a count <b>n</b>). Each step then shows how many people it removes and how many are left.</p><p>After that, everything updates without running the query again: <b>arrows</b> change the step order, and each step can be set to <b>On</b> (keep people who pass), <b>Reverse</b> (keep only people who fail it) or <b>Off</b> (ignore it) to see a what-if audience. <b>Audience</b> on any step gives a query that lists who is removed there, who is left, or who is blocked only by that step.</p>
       </div>
     </div>
     <div class="wf-paste">
@@ -102,7 +102,7 @@
       <div class="wf-final" id="wfFinal"></div>
       <button class="btn primary" id="wfCopyTable" type="button" title="Copies the steps that are On or Reversed, ready to paste into Excel or Google Sheets">Copy table</button>
     </div>
-    <div class="wf-head"><span></span><span>Step</span><span>Remaining vs removed</span><span>Removed</span><span>Left</span></div>
+    <div class="wf-head"><span></span><span>Step</span><span>Mode</span><span>Remaining</span><span>Removed</span><span>Left</span><span title="People who fail only this step and pass every other step that is on">Only blocker</span><span></span></div>
     <div id="wfRows"></div>
   </section>
 
